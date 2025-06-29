@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Mail, Lock, User, LogIn, Eye, EyeOff } from 'lucide-react';
+import { Mail, Lock, User, LogIn, Eye, EyeOff, CheckCircle } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import ParticleBackground from './ParticleBackground';
@@ -19,6 +19,7 @@ export default function AuthForm({ onAuthSuccess, initialMode = 'signin' }: Auth
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isSliding, setIsSliding] = useState(false);
+  const [justSignedUp, setJustSignedUp] = useState(false);
   
   const { logAction } = useAuditLog();
 
@@ -43,31 +44,44 @@ export default function AuthForm({ onAuthSuccess, initialMode = 'signin' }: Auth
           }
         });
         
+        // Set the flag to show success state
+        setJustSignedUp(true);
+        setPassword('');
+        
         // Show success message for sign up
         const toast = document.createElement('div');
         toast.className = 'fixed top-4 right-4 z-50 bg-green-600 text-white px-6 py-3 rounded-lg shadow-lg font-jetbrains text-sm border border-green-500/50';
         toast.innerHTML = `
           <div class="flex items-center gap-2">
             <div class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-            Account created successfully! You can now sign in.
+            Account created successfully! You can now sign in with your credentials.
           </div>
         `;
         document.body.appendChild(toast);
         
         setTimeout(() => {
-          document.body.removeChild(toast);
-        }, 4000);
+          if (document.body.contains(toast)) {
+            document.body.removeChild(toast);
+          }
+        }, 6000);
         
-        // Switch to sign in mode
-        setIsSignUp(false);
-        setPassword('');
-        navigate('/auth/signin', { replace: true });
+        // Switch to sign in mode after a brief delay
+        setTimeout(() => {
+          setIsSignUp(false);
+          navigate('/auth/signin', { replace: true });
+        }, 1500);
       } else {
         const { data, error } = await supabase.auth.signInWithPassword({
           email,
           password,
         });
-        if (error) throw error;
+        if (error) {
+          // Provide more helpful error messages
+          if (error.message === 'Invalid login credentials') {
+            throw new Error('The email or password you entered is incorrect. Please check your credentials and try again.');
+          }
+          throw error;
+        }
         
         // Log login action
         logAction({
@@ -109,6 +123,7 @@ export default function AuthForm({ onAuthSuccess, initialMode = 'signin' }: Auth
   const handleToggleMode = () => {
     setIsSliding(true);
     setError(null);
+    setJustSignedUp(false);
     
     setTimeout(() => {
       setIsSignUp(!isSignUp);
@@ -149,18 +164,41 @@ export default function AuthForm({ onAuthSuccess, initialMode = 'signin' }: Auth
               </h1>
               <div className={`transition-all duration-300 transform ${isSliding ? 'translate-x-4 opacity-0' : 'translate-x-0 opacity-100'}`}>
                 <p className="text-gray-300 font-jetbrains text-lg">
-                  {isSignUp ? 'Create your account' : 'Welcome back'}
+                  {isSignUp ? 'Create your account' : justSignedUp ? 'Now sign in to continue' : 'Welcome back'}
                 </p>
                 <p className="text-blue-400 font-jetbrains text-sm mt-1">
-                  {isSignUp ? 'Join the tournament management revolution' : 'Sign in to manage your tournaments'}
+                  {isSignUp ? 'Join the tournament management revolution' : justSignedUp ? 'Use the credentials you just created' : 'Sign in to manage your tournaments'}
                 </p>
               </div>
             </div>
+
+            {/* Success Message for Just Signed Up */}
+            {justSignedUp && !isSignUp && (
+              <div className="mb-6 p-4 bg-green-900/30 border border-green-500/50 rounded-xl backdrop-blur-sm">
+                <div className="flex items-center gap-3">
+                  <CheckCircle className="w-5 h-5 text-green-400" />
+                  <div>
+                    <p className="text-green-300 text-sm font-jetbrains font-medium">Account created successfully!</p>
+                    <p className="text-green-400 text-xs font-jetbrains mt-1">Please sign in with your new credentials below.</p>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Error Message */}
             {error && (
               <div className="mb-6 p-4 bg-red-900/30 border border-red-500/50 rounded-xl backdrop-blur-sm">
                 <p className="text-red-300 text-sm font-jetbrains">{error}</p>
+                {!isSignUp && error.includes('incorrect') && (
+                  <p className="text-red-400 text-xs font-jetbrains mt-2">
+                    Don't have an account yet? <button 
+                      onClick={handleToggleMode}
+                      className="text-blue-400 hover:text-blue-300 underline"
+                    >
+                      Create one here
+                    </button>
+                  </p>
+                )}
               </div>
             )}
 
