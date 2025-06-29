@@ -2,46 +2,33 @@ import React, { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { useNavigate } from 'react-router-dom';
 import { Ad } from '../types/database';
+import { Wifi, WifiOff } from 'lucide-react';
+import './AdMarquee.css';
 
 const AdMarquee: React.FC = () => {
   const [ads, setAds] = useState<Ad[]>([]);
   const [currentAdIndex, setCurrentAdIndex] = useState(0);
   const [userCountry, setUserCountry] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
   const navigate = useNavigate();
 
   useEffect(() => {
-    // Detect user's country (simplified version)
-    const detectUserCountry = async () => {
-      try {
-        // Check if country is stored in user profile
-        const { data: { user } } = await supabase.auth.getUser();
-        if (user) {
-          const { data: profile } = await supabase
-            .from('user_profiles')
-            .select('country')
-            .eq('id', user.id)
-            .single();
-            
-          if (profile?.country) {
-            setUserCountry(profile.country);
-            return;
-          }
-        }
-        
-        // Fallback to browser language for demo purposes
-        const browserLang = navigator.language || 'en-US';
-        const countryCode = browserLang.split('-')[1];
-        if (countryCode && countryCode.length === 2) {
-          setUserCountry(countryCode);
-        }
-      } catch (err) {
-        console.error('Error detecting country:', err);
-      }
-    };
-
+    // Set up online/offline detection
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    
+    // Detect user's country and fetch ads
     detectUserCountry();
     fetchAds();
+    
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
   }, []);
 
   // Set up ad rotation
@@ -57,16 +44,46 @@ const AdMarquee: React.FC = () => {
     return () => clearInterval(rotationInterval);
   }, [ads]);
 
+  const detectUserCountry = async () => {
+    try {
+      // Check if country is stored in user profile
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        const { data: profile } = await supabase
+          .from('user_profiles')
+          .select('country')
+          .eq('id', user.id)
+          .single();
+          
+        if (profile?.country) {
+          setUserCountry(profile.country);
+          return;
+        }
+      }
+      
+      // Fallback to browser language for demo purposes
+      const browserLang = navigator.language || 'en-US';
+      const countryCode = browserLang.split('-')[1];
+      if (countryCode && countryCode.length === 2) {
+        setUserCountry(countryCode);
+      }
+    } catch (err) {
+      console.error('Error detecting country:', err);
+    }
+  };
+
   const fetchAds = async () => {
     try {
       setIsLoading(true);
+      
+      const today = new Date().toISOString().split('T')[0];
       
       const { data, error } = await supabase
         .from('ads')
         .select('*')
         .eq('active', true)
-        .gte('start_date', new Date().toISOString().split('T')[0])
-        .lte('end_date', new Date().toISOString().split('T')[0])
+        .lte('start_date', today)
+        .gte('end_date', today)
         .order('priority', { ascending: true, nullsLast: true });
         
       if (error) throw error;
@@ -106,33 +123,33 @@ const AdMarquee: React.FC = () => {
   const handleSignUp = () => {
     navigate('/auth/signup');
   };
+  
+  // Handle ad click
+  const handleAdClick = (url?: string) => {
+    if (url) {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    }
+  };
 
-  if (isLoading || filteredAds.length === 0 && !defaultMessage) {
-    return null; // Don't show anything while loading or if no ads and no default message
+  if (isLoading) {
+    return null; // Don't show anything while loading
   }
-
-  // Get current ad to display
-  const currentAd = filteredAds.length > 0 ? filteredAds[currentAdIndex] : null;
 
   return (
     <div className="bg-gradient-to-r from-blue-900/80 to-purple-900/80 text-white py-2 overflow-hidden border-b border-blue-500/30">
       <div className="marquee-container relative">
         {filteredAds.length > 0 ? (
           <div className="flex items-center justify-center">
-            {currentAd?.url ? (
-              <a 
-                href={currentAd.url} 
-                target="_blank" 
-                rel="noopener noreferrer"
-                className="hover:text-blue-300 transition-colors duration-200 px-4 whitespace-nowrap overflow-hidden text-ellipsis"
-              >
-                {currentAd.text}
-              </a>
-            ) : (
-              <span className="px-4 whitespace-nowrap overflow-hidden text-ellipsis">
-                {currentAd?.text}
-              </span>
-            )}
+            <div 
+              className={`px-4 whitespace-nowrap overflow-hidden text-ellipsis ${
+                filteredAds[currentAdIndex]?.url ? 'cursor-pointer hover:text-blue-300 transition-colors duration-200' : ''
+              }`}
+              onClick={() => filteredAds[currentAdIndex]?.url && handleAdClick(filteredAds[currentAdIndex].url)}
+            >
+              <div className="marquee-content">
+                {filteredAds[currentAdIndex]?.text}
+              </div>
+            </div>
           </div>
         ) : (
           <div className="flex items-center justify-center">
@@ -177,6 +194,15 @@ const AdMarquee: React.FC = () => {
             </span>
           </div>
         )}
+        
+        {/* Connection indicator */}
+        <div className="absolute right-4 top-1/2 transform -translate-y-1/2">
+          {isOnline ? (
+            <Wifi size={16} className="text-green-400" />
+          ) : (
+            <WifiOff size={16} className="text-yellow-400 animate-pulse" />
+          )}
+        </div>
       </div>
     </div>
   );
