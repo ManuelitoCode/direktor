@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { X, Download, Trophy, Target, TrendingUp, Calendar, Users, Medal, Award } from 'lucide-react';
+import { X, Download, Trophy, Target, TrendingUp, Calendar, Users, Medal, Award, BarChart3 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Player, Result, Pairing } from '../types/database';
 import PlayerLink from './PlayerLink';
 import BadgeList from './Badges/BadgeList';
+import { useAuditLog } from '../hooks/useAuditLog';
 
 interface PlayerDetailsModalProps {
   isOpen: boolean;
@@ -52,6 +53,7 @@ const PlayerDetailsModal: React.FC<PlayerDetailsModalProps> = ({
   const [playerStats, setPlayerStats] = useState<PlayerStats | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { logAction } = useAuditLog();
 
   useEffect(() => {
     if (isOpen && playerId && tournamentId) {
@@ -91,7 +93,7 @@ const PlayerDetailsModal: React.FC<PlayerDetailsModalProps> = ({
             player2:players!pairings_player2_id_fkey(id, name, rating)
           )
         `)
-        .eq('pairing.tournament_id', tournamentId);
+        .eq('tournament_id', tournamentId);
 
       if (resultsError) throw resultsError;
 
@@ -205,10 +207,30 @@ const PlayerDetailsModal: React.FC<PlayerDetailsModalProps> = ({
         games,
         badges: badgesData || []
       });
+      
+      // Log player details view
+      logAction({
+        action: 'player_details_viewed',
+        details: {
+          player_id: playerId,
+          player_name: playerData.name,
+          tournament_id: tournamentId
+        }
+      });
 
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error loading player stats:', err);
       setError('Failed to load player statistics');
+      
+      // Log error
+      logAction({
+        action: 'player_details_error',
+        details: {
+          player_id: playerId,
+          tournament_id: tournamentId,
+          error: err.message
+        }
+      });
     } finally {
       setIsLoading(false);
     }
@@ -226,7 +248,7 @@ const PlayerDetailsModal: React.FC<PlayerDetailsModalProps> = ({
           round_number
         )
       `)
-      .eq('pairing.tournament_id', tournamentId);
+      .eq('tournament_id', tournamentId);
 
     const standings = players.map(player => {
       let wins = 0;
@@ -270,7 +292,7 @@ const PlayerDetailsModal: React.FC<PlayerDetailsModalProps> = ({
       };
     });
 
-    // Sort by points, then spread, then rating
+    // Sort by points (desc), then spread (desc), then rating (desc)
     standings.sort((a, b) => {
       if (a.points !== b.points) return b.points - a.points;
       if (a.spread !== b.spread) return b.spread - a.spread;
@@ -315,6 +337,17 @@ const PlayerDetailsModal: React.FC<PlayerDetailsModalProps> = ({
       a.download = `${playerStats.player.name}_Summary.csv`;
       a.click();
       URL.revokeObjectURL(url);
+      
+      // Log export
+      logAction({
+        action: 'player_summary_exported',
+        details: {
+          player_id: playerId,
+          player_name: playerStats.player.name,
+          format: 'csv',
+          tournament_id: tournamentId
+        }
+      });
     } else {
       // For PDF, we'll create a simple text-based summary
       alert('PDF export coming soon! Use CSV export for now.');
@@ -393,14 +426,14 @@ const PlayerDetailsModal: React.FC<PlayerDetailsModalProps> = ({
             <div className="space-y-8">
               {/* Player Header */}
               <div className="bg-gradient-to-r from-blue-900/30 to-purple-900/30 border border-blue-500/50 rounded-xl p-6">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                   <div>
                     <h3 className="text-4xl font-bold text-white font-orbitron mb-2">
                       <PlayerLink playerId={playerStats.player.id!} playerName={playerStats.player.name}>
                         {playerStats.player.name}
                       </PlayerLink>
                     </h3>
-                    <div className="flex items-center gap-6 text-lg text-blue-300">
+                    <div className="flex flex-wrap items-center gap-6 text-lg text-blue-300">
                       <div className="flex items-center gap-2">
                         <Target className="w-5 h-5" />
                         <span className="font-jetbrains">Rating: {playerStats.player.rating}</span>
@@ -409,6 +442,12 @@ const PlayerDetailsModal: React.FC<PlayerDetailsModalProps> = ({
                         <Medal className="w-5 h-5" />
                         <span className="font-jetbrains">Current Rank: #{playerStats.currentRank}</span>
                       </div>
+                      {playerStats.player.team_name && (
+                        <div className="flex items-center gap-2">
+                          <Users className="w-5 h-5" />
+                          <span className="font-jetbrains">Team: {playerStats.player.team_name}</span>
+                        </div>
+                      )}
                     </div>
                   </div>
                   
@@ -466,6 +505,67 @@ const PlayerDetailsModal: React.FC<PlayerDetailsModalProps> = ({
                     {playerStats.firstMoveGames}
                   </div>
                   <div className="text-sm text-gray-400 font-jetbrains">First Moves</div>
+                </div>
+              </div>
+
+              {/* Performance Chart */}
+              <div className="bg-gray-900/50 border border-gray-700 rounded-xl p-6">
+                <h4 className="text-lg font-bold text-white font-orbitron mb-4 flex items-center gap-2">
+                  <BarChart3 className="w-5 h-5 text-blue-400" />
+                  Performance Metrics
+                </h4>
+                
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {/* Score Distribution */}
+                  <div className="bg-gray-800/50 border border-gray-700 rounded-lg p-4">
+                    <h5 className="text-sm font-medium text-gray-300 mb-3 font-jetbrains">Score Distribution</h5>
+                    <div className="h-40 flex items-end justify-around gap-1">
+                      {playerStats.games.map((game, index) => (
+                        <div 
+                          key={index} 
+                          className="w-full max-w-[20px] bg-blue-500 rounded-t"
+                          style={{ 
+                            height: `${Math.min(100, (game.playerScore / 600) * 100)}%`,
+                            backgroundColor: game.result === 'won' ? '#4ade80' : 
+                                            game.result === 'lost' ? '#f87171' : '#facc15'
+                          }}
+                          title={`Round ${game.round}: ${game.playerScore} vs ${game.opponentName}`}
+                        />
+                      ))}
+                    </div>
+                    <div className="mt-2 text-xs text-gray-400 text-center">
+                      Game Scores by Round
+                    </div>
+                  </div>
+                  
+                  {/* Win/Loss Ratio */}
+                  <div className="bg-gray-800/50 border border-gray-700 rounded-lg p-4">
+                    <h5 className="text-sm font-medium text-gray-300 mb-3 font-jetbrains">Win/Loss Ratio</h5>
+                    <div className="relative h-40 flex items-center justify-center">
+                      <div className="w-full h-8 bg-gray-700 rounded-full overflow-hidden">
+                        <div 
+                          className="h-full bg-gradient-to-r from-green-500 via-yellow-500 to-red-500"
+                          style={{ 
+                            width: '100%',
+                            clipPath: `polygon(0 0, ${playerStats.winPercentage}% 0, ${playerStats.winPercentage}% 100%, 0 100%)`
+                          }}
+                        />
+                      </div>
+                      <div 
+                        className="absolute top-1/2 transform -translate-y-1/2"
+                        style={{ left: `${playerStats.winPercentage}%` }}
+                      >
+                        <div className="w-4 h-12 bg-white rounded-full -ml-2"></div>
+                      </div>
+                      <div className="absolute bottom-0 left-0 text-xs text-green-400">Wins ({playerStats.wins})</div>
+                      <div className="absolute bottom-0 right-0 text-xs text-red-400">Losses ({playerStats.losses})</div>
+                      {playerStats.draws > 0 && (
+                        <div className="absolute bottom-0 left-1/2 transform -translate-x-1/2 text-xs text-yellow-400">
+                          Draws ({playerStats.draws})
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 </div>
               </div>
 

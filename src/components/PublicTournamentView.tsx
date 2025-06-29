@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, RefreshCw, Filter, Search, X, Download, ChevronDown, Eye, BarChart3 } from 'lucide-react';
+import { ArrowLeft, RefreshCw, Filter, Search, X, Download, ChevronDown, Eye, BarChart3, Calendar, MapPin } from 'lucide-react';
 import ParticleBackground from './ParticleBackground';
 import AdMarquee from './AdMarquee';
 import PlayerDetailsModal from './PlayerDetailsModal';
@@ -42,7 +42,7 @@ const PublicTournamentView: React.FC = () => {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [activeTab, setActiveTab] = useState<'players' | 'pairings' | 'standings'>('players');
+  const [activeTab, setActiveTab] = useState<'players' | 'pairings' | 'standings'>('standings');
   const [isMobile, setIsMobile] = useState(false);
   const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null);
   const [showPlayerModal, setShowPlayerModal] = useState(false);
@@ -360,7 +360,8 @@ const PublicTournamentView: React.FC = () => {
   };
 
   const handlePlayerClick = (playerId: string) => {
-    navigate(`/players/${playerId}`);
+    setSelectedPlayerId(playerId);
+    setShowPlayerModal(true);
     
     // Log player details view
     logAction({
@@ -374,7 +375,7 @@ const PublicTournamentView: React.FC = () => {
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
-    await loadTournamentData();
+    await loadDivisionData();
     setIsRefreshing(false);
     
     // Log manual refresh
@@ -745,32 +746,49 @@ const PublicTournamentView: React.FC = () => {
                   onChange={(e) => setActiveTab(e.target.value as any)}
                   className="w-full bg-gray-800/50 border border-gray-600 rounded-lg px-4 py-3 text-white font-jetbrains focus:border-blue-500 focus:outline-none appearance-none"
                 >
-                  <option value="players">Registered Players</option>
-                  <option value="pairings">Round Pairings</option>
                   <option value="standings">Live Standings</option>
+                  <option value="pairings">Round Pairings</option>
+                  <option value="players">Registered Players</option>
                 </select>
                 <ChevronDown className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5 pointer-events-none" />
               </div>
             ) : (
               <div className="flex items-center justify-center gap-2">
-                {[
-                  { key: 'players', label: 'Registered Players', icon: Users },
-                  { key: 'pairings', label: 'Round Pairings', icon: Trophy },
-                  { key: 'standings', label: 'Live Standings', icon: Trophy }
-                ].map(({ key, label, icon: Icon }) => (
-                  <button
-                    key={key}
-                    onClick={() => setActiveTab(key as any)}
-                    className={`flex items-center gap-2 px-6 py-3 rounded-lg font-jetbrains font-medium transition-all duration-300 ${
-                      activeTab === key
-                        ? 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-400'
-                        : 'bg-gray-800/50 border border-gray-600/50 text-gray-400 hover:bg-gray-700/50 hover:text-white'
-                    }`}
-                  >
-                    <Icon size={16} />
-                    {label}
-                  </button>
-                ))}
+                <button
+                  onClick={() => setActiveTab('standings')}
+                  className={`flex items-center gap-2 px-6 py-3 rounded-lg font-jetbrains font-medium transition-all duration-300 ${
+                    activeTab === 'standings'
+                      ? 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-400'
+                      : 'bg-gray-800/50 border border-gray-600/50 text-gray-400 hover:bg-gray-700/50 hover:text-white'
+                  }`}
+                >
+                  <Trophy size={16} />
+                  Live Standings
+                </button>
+                
+                <button
+                  onClick={() => setActiveTab('pairings')}
+                  className={`flex items-center gap-2 px-6 py-3 rounded-lg font-jetbrains font-medium transition-all duration-300 ${
+                    activeTab === 'pairings'
+                      ? 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-400'
+                      : 'bg-gray-800/50 border border-gray-600/50 text-gray-400 hover:bg-gray-700/50 hover:text-white'
+                  }`}
+                >
+                  <Trophy size={16} />
+                  Round Pairings
+                </button>
+                
+                <button
+                  onClick={() => setActiveTab('players')}
+                  className={`flex items-center gap-2 px-6 py-3 rounded-lg font-jetbrains font-medium transition-all duration-300 ${
+                    activeTab === 'players'
+                      ? 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-400'
+                      : 'bg-gray-800/50 border border-gray-600/50 text-gray-400 hover:bg-gray-700/50 hover:text-white'
+                  }`}
+                >
+                  <Users size={16} />
+                  Registered Players
+                </button>
               </div>
             )}
           </div>
@@ -806,6 +824,11 @@ const PublicTournamentView: React.FC = () => {
                         <div className="text-sm text-gray-400 font-jetbrains">
                           Rating: {player.rating}
                         </div>
+                        {player.team_name && (
+                          <div className="mt-1 text-xs text-blue-400 font-jetbrains">
+                            Team: {player.team_name}
+                          </div>
+                        )}
                       </button>
                     ))}
                   </div>
@@ -915,9 +938,9 @@ const PublicTournamentView: React.FC = () => {
                                 <td className="px-4 py-4 text-center">
                                   {pairing.result ? (
                                     <div className="flex items-center justify-center">
-                                      {pairing.result.winner_id === pairing.player1_id ? (
+                                      {pairing.result.player1_score > pairing.result.player2_score ? (
                                         <span className="text-green-400 font-jetbrains text-sm">P1 Wins</span>
-                                      ) : pairing.result.winner_id === pairing.player2_id ? (
+                                      ) : pairing.result.player1_score < pairing.result.player2_score ? (
                                         <span className="text-green-400 font-jetbrains text-sm">P2 Wins</span>
                                       ) : (
                                         <span className="text-yellow-400 font-jetbrains text-sm">Tie</span>
@@ -995,15 +1018,17 @@ const PublicTournamentView: React.FC = () => {
                           </td>
                           
                           <td className="px-6 py-4 whitespace-nowrap">
-                            <PlayerLink 
-                              playerId={standing.id} 
-                              playerName={standing.name}
+                            <button 
+                              onClick={() => handlePlayerClick(standing.id)}
                               className="text-left hover:bg-blue-500/20 rounded-lg p-2 -m-2 transition-all duration-200 group block"
                             >
                               <div className="text-sm font-medium text-white group-hover:text-blue-300 transition-colors duration-200">
                                 {standing.name} (#{standing.rank})
                               </div>
-                            </PlayerLink>
+                              <div className="text-xs text-gray-400 font-jetbrains">
+                                Rating: {standing.rating}
+                              </div>
+                            </button>
                           </td>
                           
                           <td className="px-6 py-4 text-center">
@@ -1073,6 +1098,19 @@ const PublicTournamentView: React.FC = () => {
           </div>
         </footer>
       </div>
+
+      {/* Player Details Modal */}
+      {selectedPlayerId && (
+        <PlayerDetailsModal
+          isOpen={showPlayerModal}
+          onClose={() => {
+            setShowPlayerModal(false);
+            setSelectedPlayerId(null);
+          }}
+          playerId={selectedPlayerId}
+          tournamentId={tournament.id}
+        />
+      )}
 
       {/* Background Effects */}
       <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-black/30 pointer-events-none"></div>

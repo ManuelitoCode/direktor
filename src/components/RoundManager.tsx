@@ -10,6 +10,7 @@ import { generatePairings } from '../utils/pairingAlgorithms';
 import PairingsManager from './PairingsManager';
 import PlayerRoster from './PlayerRoster';
 import WinProbabilityBadge from './WinProbabilityBadge';
+import PrintablePairings from './PrintablePairings';
 
 interface RoundManagerProps {
   onBack: () => void;
@@ -49,6 +50,8 @@ const RoundManager: React.FC<RoundManagerProps> = ({
   const [unpairingRound, setUnpairingRound] = useState<number | null>(null);
   const [roundStatuses, setRoundStatuses] = useState<Array<{round: number, status: 'unpaired' | 'paired' | 'in-progress' | 'completed'}>>([]);
   const [basePairingRound, setBasePairingRound] = useState<number>(0); // 0 means use ratings, otherwise use standings from that round
+  const [showPrintableView, setShowPrintableView] = useState(false);
+  const [confirmUnpair, setConfirmUnpair] = useState<number | null>(null);
   
   const { logAction } = useAuditLog();
   const { setTournamentRound } = useTournamentProgress();
@@ -128,9 +131,27 @@ const RoundManager: React.FC<RoundManagerProps> = ({
 
       // Calculate player standings for current round
       await calculatePlayerStandings();
+      
+      // Log round manager access
+      logAction({
+        action: 'round_manager_accessed',
+        details: {
+          tournament_id: tournamentId,
+          current_round: selectedRound
+        }
+      });
     } catch (err: any) {
       console.error('Error loading round manager data:', err);
       setError(handleSupabaseError(err, 'loading round data'));
+      
+      // Log error
+      logAction({
+        action: 'round_manager_load_error',
+        details: {
+          tournament_id: tournamentId,
+          error: String(err)
+        }
+      });
     } finally {
       setIsLoading(false);
     }
@@ -355,23 +376,28 @@ const RoundManager: React.FC<RoundManagerProps> = ({
         };
       });
 
+      // Filter out inactive players
+      const activePlayers = playersWithStats.filter(p => 
+        p.participation_status === 'active' || !p.participation_status
+      );
+
       // Sort by points, then spread, then rating
-      playersWithStats.sort((a, b) => {
+      activePlayers.sort((a, b) => {
         if (a.points !== b.points) return b.points - a.points;
         if (a.spread !== b.spread) return b.spread - a.spread;
         return b.rating - a.rating;
       });
 
       // Assign ranks
-      playersWithStats.forEach((player, index) => {
+      activePlayers.forEach((player, index) => {
         player.rank = index + 1;
       });
 
-      setPlayersWithRank(playersWithStats);
+      setPlayersWithRank(activePlayers);
 
       // Generate pairings if this is a new round
-      if (!pairingsLocked && playersWithStats.length > 0) {
-        generateRoundPairings(playersWithStats);
+      if (!pairingsLocked && activePlayers.length > 0) {
+        generateRoundPairings(activePlayers);
       }
     } catch (err: any) {
       console.error('Error calculating player standings:', err);
@@ -392,22 +418,45 @@ const RoundManager: React.FC<RoundManagerProps> = ({
       );
 
       setPairings(generatedPairings);
+      
+      // Log pairing generation
+      logAction({
+        action: 'pairings_generated',
+        details: {
+          tournament_id: tournamentId,
+          round: selectedRound,
+          pairing_system: selectedPairingSystem,
+          player_count: players.length,
+          pairing_count: generatedPairings.length
+        }
+      });
     } catch (err: any) {
       console.error('Error generating pairings:', err);
       setError(`Failed to generate pairings: ${err.message}`);
+      
+      // Log error
+      logAction({
+        action: 'pairings_generation_error',
+        details: {
+          tournament_id: tournamentId,
+          round: selectedRound,
+          pairing_system: selectedPairingSystem,
+          error: err.message
+        }
+      });
     }
   };
 
-  const handleRegeneratePairings = () => {
+  const handleGeneratePairings = () => {
     setIsGenerating(true);
     setError(null);
 
     try {
       generateRoundPairings(playersWithRank);
       
-      // Log pairing regeneration
+      // Log pairing generation
       logAction({
-        action: 'pairings_regenerated',
+        action: 'pairings_generated_manually',
         details: {
           tournament_id: tournamentId,
           round: selectedRound,
@@ -417,8 +466,8 @@ const RoundManager: React.FC<RoundManagerProps> = ({
         }
       });
     } catch (err: any) {
-      console.error('Error regenerating pairings:', err);
-      setError(`Failed to regenerate pairings: ${err.message}`);
+      console.error('Error generating pairings:', err);
+      setError(`Failed to generate pairings: ${err.message}`);
     } finally {
       setIsGenerating(false);
     }
@@ -605,15 +654,54 @@ const RoundManager: React.FC<RoundManagerProps> = ({
     } catch (err: any) {
       console.error('Error saving pairings:', err);
       setError(handleSupabaseError(err, 'saving pairings'));
+      
+      // Log error
+      logAction({
+        action: 'pairings_save_error',
+        details: {
+          tournament_id: tournamentId,
+          round: selectedRound,
+          error: String(err)
+        }
+      });
     } finally {
       setIsSaving(false);
     }
   };
 
   const handleUnpairRound = async (round: number) => {
+    if (confirmUnpair !== round) {
+      setConfirmUnpair(round);
+      setTimeout(() => setConfirmUnpair(null), 3000);
+      return;
+    }
+    
     setUnpairingRound(round);
+    setConfirmUnpair(null);
     
     try {
+      // Delete results for this round first
+      await retrySupabaseOperation(async () => {
+        const { error } = await supabase
+          .from('results')
+          .delete()
+          .eq('tournament_id', tournamentId)
+          .eq('round_number', round);
+
+        if (error) throw error;
+      });
+
+      // Then delete pairings
+      await retrySupabaseOperation(async () => {
+        const { error } = await supabase
+          .from('pairings')
+          .delete()
+          .eq('tournament_id', tournamentId)
+          .eq('round_number', round);
+
+        if (error) throw error;
+      });
+      
       // Update tournament current round if needed
       if (round === currentRound && round > 1) {
         await setTournamentRound(tournamentId, round - 1);
@@ -650,9 +738,36 @@ const RoundManager: React.FC<RoundManagerProps> = ({
           round: round
         }
       });
+      
+      // Show success toast
+      const toast = document.createElement('div');
+      toast.className = 'fixed top-4 right-4 z-50 bg-green-600 text-white px-6 py-3 rounded-lg shadow-lg font-jetbrains text-sm border border-green-500/50';
+      toast.innerHTML = `
+        <div class="flex items-center gap-2">
+          <div class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+          Round ${round} has been unpaired successfully
+        </div>
+      `;
+      document.body.appendChild(toast);
+      
+      setTimeout(() => {
+        if (document.body.contains(toast)) {
+          document.body.removeChild(toast);
+        }
+      }, 3000);
     } catch (err: any) {
       console.error('Error handling unpair round:', err);
       setError(handleSupabaseError(err, 'updating round after unpair'));
+      
+      // Log error
+      logAction({
+        action: 'round_unpair_error',
+        details: {
+          tournament_id: tournamentId,
+          round: round,
+          error: String(err)
+        }
+      });
     } finally {
       setUnpairingRound(null);
     }
@@ -684,6 +799,16 @@ const RoundManager: React.FC<RoundManagerProps> = ({
     a.download = `Round_${selectedRound}_Pairings.csv`;
     a.click();
     URL.revokeObjectURL(url);
+    
+    // Log export
+    logAction({
+      action: 'pairings_exported',
+      details: {
+        tournament_id: tournamentId,
+        round: selectedRound,
+        format: 'csv'
+      }
+    });
   };
 
   // Get available rounds for base pairing
@@ -920,6 +1045,17 @@ const RoundManager: React.FC<RoundManagerProps> = ({
                       </div>
                     )}
                     
+                    {/* Print Button - only if pairings exist */}
+                    {pairings.length > 0 && (
+                      <button
+                        onClick={() => setShowPrintableView(true)}
+                        className="flex items-center gap-2 px-3 py-2 bg-gray-800/50 border border-gray-600 rounded-lg text-gray-300 hover:text-white hover:bg-gray-700/50 transition-all duration-200 font-jetbrains text-sm"
+                      >
+                        <Eye size={16} />
+                        Print View
+                      </button>
+                    )}
+                    
                     {/* Export Button - only if pairings exist */}
                     {pairings.length > 0 && (
                       <button
@@ -931,10 +1067,10 @@ const RoundManager: React.FC<RoundManagerProps> = ({
                       </button>
                     )}
                     
-                    {/* Regenerate Button - only if not locked */}
+                    {/* Generate Button - only if not locked */}
                     {!pairingsLocked && (
                       <button
-                        onClick={handleRegeneratePairings}
+                        onClick={handleGeneratePairings}
                         disabled={isGenerating || isSaving}
                         className="flex items-center gap-2 px-3 py-2 bg-blue-600/20 border border-blue-500/50 text-blue-400 hover:bg-blue-600/30 hover:text-white rounded-lg transition-all duration-200 font-jetbrains text-sm disabled:opacity-50 disabled:cursor-not-allowed"
                       >
@@ -946,7 +1082,7 @@ const RoundManager: React.FC<RoundManagerProps> = ({
                         ) : (
                           <>
                             <RefreshCw size={16} />
-                            Regenerate
+                            Generate
                           </>
                         )}
                       </button>
@@ -1059,7 +1195,7 @@ const RoundManager: React.FC<RoundManagerProps> = ({
                 
                 {pairings.length === 0 && (
                   <div className="text-center py-12 text-gray-400 font-jetbrains">
-                    No pairings generated yet
+                    No pairings generated yet. Click "Generate" to create pairings.
                   </div>
                 )}
               </div>
@@ -1123,6 +1259,17 @@ const RoundManager: React.FC<RoundManagerProps> = ({
           </div>
         </footer>
       </div>
+
+      {/* Printable Pairings View */}
+      {showPrintableView && tournament && (
+        <PrintablePairings
+          isOpen={showPrintableView}
+          onClose={() => setShowPrintableView(false)}
+          tournamentName={tournament.name}
+          currentRound={selectedRound}
+          pairings={pairings}
+        />
+      )}
 
       {/* Background Effects */}
       <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-black/30 pointer-events-none"></div>

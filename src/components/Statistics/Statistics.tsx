@@ -1,10 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, BarChart3, RefreshCw, Filter, Search, X } from 'lucide-react';
+import { ArrowLeft, BarChart3, RefreshCw, Filter, Search, X, Download } from 'lucide-react';
 import ParticleBackground from '../ParticleBackground';
 import StatisticsCard from './StatisticsCard';
 import { supabase } from '../../lib/supabase';
 import { Tournament } from '../../types/database';
+import { useAuditLog } from '../../hooks/useAuditLog';
+import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend, PointElement, LineElement } from 'chart.js';
+import { Bar, Line } from 'react-chartjs-2';
+
+// Register Chart.js components
+ChartJS.register(CategoryScale, LinearScale, BarElement, PointElement, LineElement, Title, Tooltip, Legend);
 
 interface StatisticsProps {
   tournamentId?: string;
@@ -30,6 +36,18 @@ interface StatResult {
   rating_diff?: number;
 }
 
+interface PlayerPerformance {
+  name: string;
+  rating: number;
+  wins: number;
+  losses: number;
+  draws: number;
+  spread: number;
+  averageScore: number;
+  highestScore: number;
+  winPercentage: number;
+}
+
 const Statistics: React.FC<StatisticsProps> = ({ tournamentId: propTournamentId, isPublic = false }) => {
   const { tournamentId: paramTournamentId, slug } = useParams<{ tournamentId?: string; slug?: string }>();
   const navigate = useNavigate();
@@ -51,6 +69,10 @@ const Statistics: React.FC<StatisticsProps> = ({ tournamentId: propTournamentId,
   const [highestScoringGames, setHighestScoringGames] = useState<StatResult[]>([]);
   const [closeDefeats, setCloseDefeats] = useState<StatResult[]>([]);
   const [biggestUpsets, setBiggestUpsets] = useState<StatResult[]>([]);
+  const [playerPerformances, setPlayerPerformances] = useState<PlayerPerformance[]>([]);
+  const [roundScoreAverages, setRoundScoreAverages] = useState<{round: number, average: number}[]>([]);
+  
+  const { logAction } = useAuditLog();
 
   // Determine the actual tournament ID to use
   const effectiveTournamentId = propTournamentId || paramTournamentId;
@@ -85,9 +107,28 @@ const Statistics: React.FC<StatisticsProps> = ({ tournamentId: propTournamentId,
       }
 
       setTournament(data);
+      
+      // Log statistics view by slug
+      logAction({
+        action: 'statistics_viewed_by_slug',
+        details: {
+          tournament_slug: slug,
+          tournament_id: data.id,
+          tournament_name: data.name
+        }
+      });
     } catch (err: any) {
       console.error('Error loading tournament by slug:', err);
       setError('Failed to load tournament');
+      
+      // Log error
+      logAction({
+        action: 'statistics_load_error',
+        details: {
+          tournament_slug: slug,
+          error: err.message
+        }
+      });
     } finally {
       setIsLoading(false);
     }
@@ -109,9 +150,27 @@ const Statistics: React.FC<StatisticsProps> = ({ tournamentId: propTournamentId,
       }
 
       setTournament(data);
+      
+      // Log statistics view by id
+      logAction({
+        action: 'statistics_viewed_by_id',
+        details: {
+          tournament_id: data.id,
+          tournament_name: data.name
+        }
+      });
     } catch (err: any) {
       console.error('Error loading tournament:', err);
       setError('Failed to load tournament');
+      
+      // Log error
+      logAction({
+        action: 'statistics_load_error',
+        details: {
+          tournament_id: effectiveTournamentId,
+          error: err.message
+        }
+      });
     } finally {
       setIsLoading(false);
     }
@@ -151,9 +210,32 @@ const Statistics: React.FC<StatisticsProps> = ({ tournamentId: propTournamentId,
       // 10. Biggest Upsets
       await fetchBiggestUpsets();
       
+      // 11. Player Performances
+      await fetchPlayerPerformances();
+      
+      // 12. Round Score Averages
+      await fetchRoundScoreAverages();
+      
+      // Log statistics loaded
+      logAction({
+        action: 'statistics_loaded',
+        details: {
+          tournament_id: tournament?.id,
+          tournament_name: tournament?.name
+        }
+      });
     } catch (err: any) {
       console.error('Error loading statistics:', err);
       setError('Failed to load tournament statistics');
+      
+      // Log error
+      logAction({
+        action: 'statistics_load_error',
+        details: {
+          tournament_id: tournament?.id,
+          error: err.message
+        }
+      });
     } finally {
       setIsRefreshing(false);
     }
@@ -699,6 +781,139 @@ const Statistics: React.FC<StatisticsProps> = ({ tournamentId: propTournamentId,
     setBiggestUpsets(upsets.slice(0, 5));
   };
 
+  const fetchPlayerPerformances = async () => {
+    try {
+      // Get all players
+      const { data: playersData, error: playersError } = await supabase
+        .from('players')
+        .select('id, name, rating')
+        .eq('tournament_id', tournament?.id);
+
+      if (playersError) throw playersError;
+
+      // Get all results
+      const { data: resultsData, error: resultsError } = await supabase
+        .from('results')
+        .select(`
+          id,
+          pairing_id,
+          player1_score,
+          player2_score,
+          winner_id,
+          pairing:pairings!results_pairing_id_fkey(
+            player1_id,
+            player2_id
+          )
+        `)
+        .eq('tournament_id', tournament?.id);
+
+      if (resultsError) throw resultsError;
+
+      // Calculate performance metrics for each player
+      const performances: PlayerPerformance[] = [];
+
+      for (const player of playersData || []) {
+        let wins = 0;
+        let losses = 0;
+        let draws = 0;
+        let totalScore = 0;
+        let totalGames = 0;
+        let totalSpread = 0;
+        let highestScore = 0;
+
+        for (const result of resultsData || []) {
+          const pairing = result.pairing;
+          if (!pairing) continue;
+
+          const isPlayer1 = pairing.player1_id === player.id;
+          const isPlayer2 = pairing.player2_id === player.id;
+
+          if (!isPlayer1 && !isPlayer2) continue;
+
+          const playerScore = isPlayer1 ? result.player1_score : result.player2_score;
+          const opponentScore = isPlayer1 ? result.player2_score : result.player1_score;
+          
+          totalScore += playerScore;
+          totalGames++;
+          totalSpread += (playerScore - opponentScore);
+          highestScore = Math.max(highestScore, playerScore);
+
+          if (playerScore > opponentScore) {
+            wins++;
+          } else if (playerScore < opponentScore) {
+            losses++;
+          } else {
+            draws++;
+          }
+        }
+
+        if (totalGames > 0) {
+          performances.push({
+            name: player.name,
+            rating: player.rating,
+            wins,
+            losses,
+            draws,
+            spread: totalSpread,
+            averageScore: totalScore / totalGames,
+            highestScore,
+            winPercentage: (wins / totalGames) * 100
+          });
+        }
+      }
+
+      // Sort by win percentage
+      performances.sort((a, b) => b.winPercentage - a.winPercentage);
+      
+      setPlayerPerformances(performances);
+    } catch (err) {
+      console.error('Error fetching player performances:', err);
+    }
+  };
+
+  const fetchRoundScoreAverages = async () => {
+    try {
+      // Get all results grouped by round
+      const { data: resultsData, error: resultsError } = await supabase
+        .from('results')
+        .select(`
+          round_number,
+          player1_score,
+          player2_score
+        `)
+        .eq('tournament_id', tournament?.id);
+
+      if (resultsError) throw resultsError;
+
+      // Calculate average scores by round
+      const roundScores: Record<number, number[]> = {};
+      
+      for (const result of resultsData || []) {
+        if (!roundScores[result.round_number]) {
+          roundScores[result.round_number] = [];
+        }
+        
+        roundScores[result.round_number].push(result.player1_score);
+        roundScores[result.round_number].push(result.player2_score);
+      }
+
+      const averages = Object.entries(roundScores).map(([round, scores]) => {
+        const average = scores.reduce((sum, score) => sum + score, 0) / scores.length;
+        return {
+          round: parseInt(round),
+          average
+        };
+      });
+
+      // Sort by round number
+      averages.sort((a, b) => a.round - b.round);
+      
+      setRoundScoreAverages(averages);
+    } catch (err) {
+      console.error('Error fetching round score averages:', err);
+    }
+  };
+
   const handleRefresh = () => {
     loadStatistics();
   };
@@ -764,6 +979,34 @@ const Statistics: React.FC<StatisticsProps> = ({ tournamentId: propTournamentId,
       </div>
     );
   }
+
+  // Prepare chart data for round score averages
+  const roundScoreChartData = {
+    labels: roundScoreAverages.map(item => `Round ${item.round}`),
+    datasets: [
+      {
+        label: 'Average Score',
+        data: roundScoreAverages.map(item => item.average),
+        borderColor: 'rgba(75, 192, 192, 1)',
+        backgroundColor: 'rgba(75, 192, 192, 0.2)',
+        tension: 0.4
+      }
+    ]
+  };
+
+  // Prepare chart data for player performances
+  const playerPerformanceChartData = {
+    labels: playerPerformances.slice(0, 10).map(player => player.name),
+    datasets: [
+      {
+        label: 'Win Percentage',
+        data: playerPerformances.slice(0, 10).map(player => player.winPercentage),
+        backgroundColor: 'rgba(54, 162, 235, 0.6)',
+        borderColor: 'rgba(54, 162, 235, 1)',
+        borderWidth: 1
+      }
+    ]
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-black to-gray-900 relative overflow-hidden">
@@ -832,6 +1075,112 @@ const Statistics: React.FC<StatisticsProps> = ({ tournamentId: propTournamentId,
                 <X className="h-5 w-5" />
               </button>
             )}
+          </div>
+        </div>
+
+        {/* Charts Section */}
+        <div className="fade-up fade-up-delay-4 max-w-6xl mx-auto w-full mb-8">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {/* Round Score Averages Chart */}
+            <div className="bg-gray-900/50 border border-blue-500/30 rounded-xl p-6">
+              <h3 className="text-lg font-bold text-white font-orbitron mb-4 flex items-center gap-2">
+                <BarChart3 className="w-5 h-5 text-blue-400" />
+                Average Scores by Round
+              </h3>
+              
+              <div className="h-64 bg-gray-800/50 rounded-lg p-4">
+                {roundScoreAverages.length > 0 ? (
+                  <Line 
+                    data={roundScoreChartData}
+                    options={{
+                      responsive: true,
+                      maintainAspectRatio: false,
+                      scales: {
+                        y: {
+                          beginAtZero: false,
+                          grid: {
+                            color: 'rgba(255, 255, 255, 0.1)'
+                          },
+                          ticks: {
+                            color: 'rgba(255, 255, 255, 0.7)'
+                          }
+                        },
+                        x: {
+                          grid: {
+                            color: 'rgba(255, 255, 255, 0.1)'
+                          },
+                          ticks: {
+                            color: 'rgba(255, 255, 255, 0.7)'
+                          }
+                        }
+                      },
+                      plugins: {
+                        legend: {
+                          labels: {
+                            color: 'rgba(255, 255, 255, 0.7)'
+                          }
+                        }
+                      }
+                    }}
+                  />
+                ) : (
+                  <div className="h-full flex items-center justify-center text-gray-400">
+                    No round data available
+                  </div>
+                )}
+              </div>
+            </div>
+            
+            {/* Player Win Percentage Chart */}
+            <div className="bg-gray-900/50 border border-green-500/30 rounded-xl p-6">
+              <h3 className="text-lg font-bold text-white font-orbitron mb-4 flex items-center gap-2">
+                <BarChart3 className="w-5 h-5 text-green-400" />
+                Top Player Win Percentages
+              </h3>
+              
+              <div className="h-64 bg-gray-800/50 rounded-lg p-4">
+                {playerPerformances.length > 0 ? (
+                  <Bar 
+                    data={playerPerformanceChartData}
+                    options={{
+                      responsive: true,
+                      maintainAspectRatio: false,
+                      scales: {
+                        y: {
+                          beginAtZero: true,
+                          max: 100,
+                          grid: {
+                            color: 'rgba(255, 255, 255, 0.1)'
+                          },
+                          ticks: {
+                            color: 'rgba(255, 255, 255, 0.7)'
+                          }
+                        },
+                        x: {
+                          grid: {
+                            color: 'rgba(255, 255, 255, 0.1)'
+                          },
+                          ticks: {
+                            color: 'rgba(255, 255, 255, 0.7)'
+                          }
+                        }
+                      },
+                      plugins: {
+                        legend: {
+                          labels: {
+                            color: 'rgba(255, 255, 255, 0.7)'
+                          }
+                        }
+                      }
+                    }}
+                  />
+                ) : (
+                  <div className="h-full flex items-center justify-center text-gray-400">
+                    No player performance data available
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         </div>
 
@@ -1018,7 +1367,7 @@ const Statistics: React.FC<StatisticsProps> = ({ tournamentId: propTournamentId,
           {/* Largest Point Spreads */}
           <div className="bg-gray-900/50 border border-purple-500/30 rounded-xl p-6 mb-8">
             <h2 className="text-xl font-bold text-white font-orbitron mb-4 flex items-center gap-2">
-              <TrendingUp className="w-6 h-6 text-purple-400" />
+              <BarChart3 className="w-6 h-6 text-purple-400" />
               Largest Point Spreads
             </h2>
             
@@ -1065,7 +1414,7 @@ const Statistics: React.FC<StatisticsProps> = ({ tournamentId: propTournamentId,
           {/* Biggest Upsets */}
           <div className="bg-gray-900/50 border border-green-500/30 rounded-xl p-6">
             <h2 className="text-xl font-bold text-white font-orbitron mb-4 flex items-center gap-2">
-              <Zap className="w-6 h-6 text-green-400" />
+              <BarChart3 className="w-6 h-6 text-green-400" />
               Biggest Upsets
             </h2>
             

@@ -1,31 +1,36 @@
 import React from 'react';
 import { FileText, Clock, Calendar, X, RefreshCw, Trash2 } from 'lucide-react';
-import { TournamentDraft } from '../../hooks/useTournamentDrafts';
+import { TournamentDraft } from '../../hooks/useTournamentDraftSystem';
+import { useAuditLog } from '../../hooks/useAuditLog';
 
 interface DraftRecoveryDialogProps {
   isOpen: boolean;
   onClose: () => void;
-  draft: TournamentDraft | null;
-  onResume: (draft: TournamentDraft) => void;
-  onDiscard: (draftId: string) => void;
+  drafts: TournamentDraft[];
+  onResumeDraft: (draftId: string) => void;
+  onDiscardDraft: (draftId: string) => Promise<boolean>;
+  onRenameDraft?: (draftId: string, newName: string) => Promise<boolean>;
   isLoading?: boolean;
 }
 
 const DraftRecoveryDialog: React.FC<DraftRecoveryDialogProps> = ({
   isOpen,
   onClose,
-  draft,
-  onResume,
-  onDiscard,
+  drafts,
+  onResumeDraft,
+  onDiscardDraft,
+  onRenameDraft,
   isLoading = false
 }) => {
-  if (!isOpen || !draft) return null;
+  const { logAction } = useAuditLog();
+
+  if (!isOpen) return null;
 
   const formatDate = (dateString: string) => {
     const date = new Date(dateString);
     return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
   };
-
+  
   const getTimeAgo = (dateString: string) => {
     const date = new Date(dateString);
     const now = new Date();
@@ -42,6 +47,34 @@ const DraftRecoveryDialog: React.FC<DraftRecoveryDialogProps> = ({
     return `${diffDays} day${diffDays !== 1 ? 's' : ''} ago`;
   };
 
+  const handleResumeDraft = (draftId: string) => {
+    onResumeDraft(draftId);
+    
+    // Log resume action
+    logAction({
+      action: 'draft_resumed_from_recovery',
+      details: {
+        draft_id: draftId
+      }
+    });
+  };
+
+  const handleDiscardDraft = async (draftId: string) => {
+    const success = await onDiscardDraft(draftId);
+    
+    // Log discard action
+    if (success) {
+      logAction({
+        action: 'draft_discarded_from_recovery',
+        details: {
+          draft_id: draftId
+        }
+      });
+    }
+    
+    return success;
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       {/* Backdrop */}
@@ -51,7 +84,7 @@ const DraftRecoveryDialog: React.FC<DraftRecoveryDialogProps> = ({
       />
       
       {/* Modal */}
-      <div className="relative w-full max-w-md bg-gray-900/95 backdrop-blur-lg border-2 border-blue-500/50 rounded-2xl shadow-2xl overflow-hidden">
+      <div className="relative w-full max-w-2xl bg-gray-900/95 backdrop-blur-lg border-2 border-blue-500/50 rounded-2xl shadow-2xl overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b-2 border-blue-500/30 bg-gradient-to-r from-blue-900/30 to-purple-900/30">
           <div className="flex items-center gap-4">
@@ -60,10 +93,10 @@ const DraftRecoveryDialog: React.FC<DraftRecoveryDialogProps> = ({
             </div>
             <div>
               <h2 className="text-2xl font-bold text-white font-orbitron">
-                Recover Draft
+                Recover Drafts
               </h2>
               <p className="text-blue-300 font-jetbrains">
-                Resume your saved tournament draft
+                Resume your saved tournament drafts
               </p>
             </div>
           </div>
@@ -77,63 +110,88 @@ const DraftRecoveryDialog: React.FC<DraftRecoveryDialogProps> = ({
         </div>
 
         {/* Content */}
-        <div className="p-6">
-          <div className="bg-gray-800/50 border border-gray-600 rounded-lg p-6 mb-6">
-            <h3 className="text-lg font-bold text-white font-orbitron mb-4">
-              {draft.data?.formData?.name || 'Untitled Tournament'}
-            </h3>
-            
-            <div className="space-y-3 text-sm">
-              <div className="flex items-center gap-2 text-gray-300">
-                <Clock className="w-4 h-4 text-blue-400" />
-                <span className="font-jetbrains">Last edited {getTimeAgo(draft.last_updated)}</span>
-              </div>
-              
-              <div className="flex items-center gap-2 text-gray-300">
-                <Calendar className="w-4 h-4 text-green-400" />
-                <span className="font-jetbrains">Created on {formatDate(draft.created_at)}</span>
-              </div>
-              
-              {draft.data?.currentStep && (
-                <div className="flex items-center gap-2 text-gray-300">
-                  <RefreshCw className="w-4 h-4 text-purple-400" />
-                  <span className="font-jetbrains">
-                    Last step: {
-                      draft.data.currentStep === 'basic' ? 'Basic Information' :
-                      draft.data.currentStep === 'pairing-method' ? 'Pairing Method Selection' :
-                      draft.data.currentStep === 'wizard' ? 'Pairing Wizard' :
-                      draft.data.currentStep === 'manual-selection' ? 'Manual Pairing Selection' :
-                      'Review'
-                    }
-                  </span>
-                </div>
-              )}
+        <div className="p-6 max-h-[60vh] overflow-y-auto">
+          {isLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <div className="w-8 h-8 border-2 border-white/30 border-t-white rounded-full animate-spin" />
             </div>
-          </div>
+          ) : drafts.length > 0 ? (
+            <div className="space-y-4">
+              {drafts.map((draft) => (
+                <div 
+                  key={draft.id}
+                  className="bg-gray-800/50 border border-gray-700 hover:border-blue-500/30 rounded-lg p-4 transition-all duration-200"
+                >
+                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <div>
+                      <h3 className="text-lg font-bold text-white font-orbitron mb-2">
+                        {draft.name || draft.data?.name || 'Untitled Tournament'}
+                      </h3>
+                      
+                      <div className="flex flex-wrap items-center gap-3 text-sm text-gray-400">
+                        <div className="flex items-center gap-1">
+                          <Clock size={14} />
+                          <span title={formatDate(draft.last_updated)}>
+                            Last edited {getTimeAgo(draft.last_updated)}
+                          </span>
+                        </div>
+                        
+                        <div className="flex items-center gap-1">
+                          <Calendar size={14} />
+                          <span>
+                            Created {new Date(draft.created_at || draft.last_updated).toLocaleDateString()}
+                          </span>
+                        </div>
+                      </div>
+                      
+                      {draft.data?.step && (
+                        <div className="mt-2 px-2 py-1 bg-blue-500/20 border border-blue-500/50 text-blue-400 rounded text-xs font-jetbrains inline-block">
+                          {draft.data.step}
+                        </div>
+                      )}
+                    </div>
+                    
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => handleDiscardDraft(draft.id)}
+                        className="flex items-center gap-1 px-3 py-2 bg-red-600/20 border border-red-500/50 text-red-400 hover:bg-red-600/30 hover:text-white rounded-lg font-jetbrains text-sm transition-all duration-200"
+                      >
+                        <Trash2 size={14} />
+                        Discard
+                      </button>
+                      
+                      <button
+                        onClick={() => handleResumeDraft(draft.id)}
+                        className="flex items-center gap-1 px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-jetbrains text-sm transition-all duration-200"
+                      >
+                        <RefreshCw size={14} />
+                        Resume
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-center py-8">
+              <FileText className="w-12 h-12 text-gray-500 mx-auto mb-4" />
+              <p className="text-gray-400 font-jetbrains">No drafts found</p>
+            </div>
+          )}
+        </div>
 
-          <div className="text-center mb-6">
-            <p className="text-gray-300 font-jetbrains text-sm">
-              Would you like to resume this draft or discard it and start fresh?
-            </p>
-          </div>
-
-          <div className="flex gap-4">
-            <button
-              onClick={() => onResume(draft)}
-              disabled={isLoading}
-              className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg font-jetbrains font-medium transition-all duration-200"
-            >
-              <FileText size={16} />
-              Resume Draft
-            </button>
+        {/* Footer */}
+        <div className="p-4 border-t border-gray-700 bg-gray-800/30">
+          <div className="flex items-center justify-between">
+            <div className="text-sm text-gray-400 font-jetbrains">
+              {drafts.length} draft{drafts.length !== 1 ? 's' : ''} found
+            </div>
             
             <button
-              onClick={() => onDiscard(draft.id)}
-              disabled={isLoading}
-              className="flex items-center justify-center gap-2 px-4 py-3 bg-red-600/20 border border-red-500/50 text-red-400 hover:bg-red-600 hover:text-white disabled:bg-gray-700 disabled:text-gray-500 disabled:border-gray-600 rounded-lg font-jetbrains font-medium transition-all duration-200"
+              onClick={onClose}
+              className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white rounded-lg font-jetbrains text-sm transition-all duration-200"
             >
-              <Trash2 size={16} />
-              Discard
+              Close
             </button>
           </div>
         </div>

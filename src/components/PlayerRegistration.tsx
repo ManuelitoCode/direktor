@@ -10,6 +10,7 @@ import { parsePlayerInput } from '../utils/playerParser';
 import { generateTeamRoundRobinPairings } from '../utils/teamPairingAlgorithms';
 import { supabase, handleSupabaseError, retrySupabaseOperation, testSupabaseConnection } from '../lib/supabase';
 import { ParsedPlayer, Player, Tournament, Division, Team } from '../types/database';
+import { useAuditLog } from '../hooks/useAuditLog';
 
 interface PlayerRegistrationProps {
   onBack: () => void;
@@ -42,6 +43,7 @@ const PlayerRegistration: React.FC<PlayerRegistrationProps> = ({
   const [retryCount, setRetryCount] = useState(0);
   const [currentStep, setCurrentStep] = useState<'team-setup' | 'player-registration' | 'schedule-generation'>('team-setup');
   const [hasRegisteredPlayers, setHasRegisteredPlayers] = useState(false);
+  const { logAction } = useAuditLog();
 
   const getPlaceholderText = (isTeamMode: boolean) => {
     if (isTeamMode) {
@@ -107,9 +109,9 @@ James Rodriguez, 1856`;
 
       // Generate public URL using slug if available
       if (tournamentData.slug) {
-        setPublicUrl(`https://direktorweb.site/tournaments/${tournamentData.slug}`);
+        setPublicUrl(`${window.location.origin}/tournaments/${tournamentData.slug}`);
       } else {
-        setPublicUrl(`https://direktorweb.site/t/${tournamentId}`);
+        setPublicUrl(`${window.location.origin}/t/${tournamentId}`);
       }
 
       // Load divisions if they exist
@@ -184,17 +186,45 @@ James Rodriguez, 1856`;
         
       if (!playersError && existingPlayers && existingPlayers.length > 0) {
         setHasRegisteredPlayers(true);
+        
+        // Log existing players found
+        logAction({
+          action: 'existing_players_found',
+          details: {
+            tournament_id: tournamentId
+          }
+        });
       } else {
-        // If no players and this is a team tournament, start with registration tab
+        // If no players and this is a team tournament, start with team setup tab
         if (tournamentData.team_mode) {
-          setCurrentStep('registration');
+          setCurrentStep('team-setup');
+        } else {
+          setCurrentStep('player-registration');
         }
+        
+        // Log no existing players
+        logAction({
+          action: 'no_existing_players',
+          details: {
+            tournament_id: tournamentId,
+            team_mode: tournamentData.team_mode
+          }
+        });
       }
 
     } catch (err: any) {
       console.error('Error loading tournament data:', err);
       const errorMessage = handleSupabaseError(err, 'loading tournament data');
       setError(errorMessage);
+      
+      // Log error
+      logAction({
+        action: 'tournament_data_load_error',
+        details: {
+          tournament_id: tournamentId,
+          error: errorMessage
+        }
+      });
     } finally {
       setIsLoading(false);
     }
@@ -220,10 +250,28 @@ James Rodriguez, 1856`;
       // If we have teams, move to player registration step
       if (teamsData && teamsData.length > 0) {
         setCurrentStep('player-registration');
+        
+        // Log teams loaded
+        logAction({
+          action: 'teams_loaded',
+          details: {
+            tournament_id: tournamentId,
+            team_count: teamsData.length
+          }
+        });
       }
     } catch (err: any) {
       console.error('Error loading teams:', err);
       // Don't show error for teams loading failure, just log it
+      
+      // Log error
+      logAction({
+        action: 'teams_load_error',
+        details: {
+          tournament_id: tournamentId,
+          error: String(err)
+        }
+      });
     }
   };
 
@@ -242,6 +290,16 @@ James Rodriguez, 1856`;
     const players = parsePlayerInput(inputText, isTeamMode);
     setParsedPlayers(players);
     setShowPreview(true);
+    
+    // Log preview action
+    logAction({
+      action: 'player_preview_generated',
+      details: {
+        tournament_id: tournamentId,
+        player_count: players.length,
+        valid_count: players.filter(p => p.isValid).length
+      }
+    });
   };
 
   const handleSavePlayersForDivision = async () => {
@@ -310,6 +368,17 @@ James Rodriguez, 1856`;
       setShowPreview(false);
       setRetryCount(0); // Reset retry count on success
       setHasRegisteredPlayers(true);
+      
+      // Log success
+      logAction({
+        action: 'players_saved',
+        details: {
+          tournament_id: tournamentId,
+          division_id: currentDivision.id,
+          player_count: validPlayers.length,
+          team_mode: isTeamMode
+        }
+      });
 
       // Move to next division or finish
       if (isLastDivision) {
@@ -335,6 +404,17 @@ James Rodriguez, 1856`;
       const errorMessage = handleSupabaseError(err, 'saving players');
       setError(errorMessage);
       setRetryCount(prev => prev + 1);
+      
+      // Log error
+      logAction({
+        action: 'players_save_error',
+        details: {
+          tournament_id: tournamentId,
+          division_id: currentDivision.id,
+          error: errorMessage,
+          retry_count: retryCount + 1
+        }
+      });
     } finally {
       setIsSaving(false);
     }
@@ -344,6 +424,14 @@ James Rodriguez, 1856`;
     setError(null);
     setConnectionError(null);
     await loadTournamentData();
+    
+    // Log retry attempt
+    logAction({
+      action: 'connection_retry',
+      details: {
+        tournament_id: tournamentId
+      }
+    });
   };
 
   const handlePreviousDivision = () => {
@@ -353,12 +441,31 @@ James Rodriguez, 1856`;
       setParsedPlayers([]);
       setShowPreview(false);
       setError(null);
+      
+      // Log navigation
+      logAction({
+        action: 'previous_division_selected',
+        details: {
+          tournament_id: tournamentId,
+          from_division: currentDivisionIndex,
+          to_division: currentDivisionIndex - 1
+        }
+      });
     }
   };
 
   const handleSkipToTournament = () => {
     if (completedDivisions.size > 0) {
       onNext();
+      
+      // Log skip action
+      logAction({
+        action: 'skipped_to_tournament',
+        details: {
+          tournament_id: tournamentId,
+          completed_divisions: Array.from(completedDivisions)
+        }
+      });
     }
   };
 
@@ -367,6 +474,15 @@ James Rodriguez, 1856`;
       await navigator.clipboard.writeText(publicUrl);
       setLinkCopied(true);
       setTimeout(() => setLinkCopied(false), 2000);
+      
+      // Log copy action
+      logAction({
+        action: 'public_link_copied',
+        details: {
+          tournament_id: tournamentId,
+          url: publicUrl
+        }
+      });
     } catch (err) {
       console.error('Failed to copy link:', err);
       // Fallback: show alert with link
@@ -376,6 +492,15 @@ James Rodriguez, 1856`;
   
   const handleViewPublic = () => {
     window.open(publicUrl, '_blank');
+    
+    // Log view action
+    logAction({
+      action: 'public_link_opened',
+      details: {
+        tournament_id: tournamentId,
+        url: publicUrl
+      }
+    });
   };
 
   const handleGenerateTeamSchedule = async () => {
@@ -432,6 +557,16 @@ James Rodriguez, 1856`;
           
           if (error) throw error;
         });
+        
+        // Log rounds update
+        logAction({
+          action: 'tournament_rounds_updated',
+          details: {
+            tournament_id: tournamentId,
+            old_rounds: tournament.rounds,
+            new_rounds: totalRounds
+          }
+        });
       }
       
       // Generate round-robin schedule for teams
@@ -477,6 +612,16 @@ James Rodriguez, 1856`;
               
             if (error) throw error;
           });
+          
+          // Log pairings creation
+          logAction({
+            action: 'team_pairings_created',
+            details: {
+              tournament_id: tournamentId,
+              round: round,
+              pairing_count: pairingsToInsert.length
+            }
+          });
         }
       }
       
@@ -487,6 +632,16 @@ James Rodriguez, 1856`;
       console.error('Error generating team schedule:', err);
       const errorMessage = handleSupabaseError(err, 'generating team schedule');
       setError(errorMessage);
+      
+      // Log error
+      logAction({
+        action: 'team_schedule_generation_error',
+        details: {
+          tournament_id: tournamentId,
+          error: errorMessage
+        }
+      });
+      
       // Still allow proceeding to next step even if schedule generation fails
       onNext();
     } finally {
@@ -686,7 +841,7 @@ James Rodriguez, 1856`;
         {publicUrl && (
           <div className="max-w-6xl mx-auto w-full mb-8">
             <div className="bg-green-900/20 border border-green-500/30 rounded-xl p-6 backdrop-blur-sm">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                 <div className="flex-1 mr-4">
                   <div className="flex items-center gap-2 mb-2">
                     <Share2 className="w-5 h-5 text-green-400" />
